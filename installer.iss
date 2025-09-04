@@ -3,7 +3,10 @@
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "Perform-Stats"
 #define InstallDir "C:\\Hardware_Monitor"
-#define SourceDir "c:\\Dev\\Perform-Stats\\dist"
+; Permettre la surcharge depuis la ligne de commande (/DSourceDir=...)
+#ifndef SourceDir
+  #define SourceDir "c:\\Dev\\Hardware-Monitor\\dist"
+#endif
 
 [Setup]
 AppId={{C0C3D3F5-0D1A-4D1A-9F1B-9B1F9A9C0F01}
@@ -35,7 +38,7 @@ Source: "{#SourceDir}\\desinstaller_service.ps1"; DestDir: "{#InstallDir}"; Flag
 
 [Run]
 ; Install and start Windows Service immediately after copying files
-Filename: "sc.exe"; Parameters: "create Hardware_Monitor binPath= '""{#InstallDir}\\PerformStatsSensorService\\PerformStatsSensorService.exe""' start= auto DisplayName= '""Hardware Monitor""'"; Flags: runhidden; StatusMsg: "Création du service Windows..."
+Filename: "sc.exe"; Parameters: "create Hardware_Monitor binPath= ""{#InstallDir}\\PerformStatsSensorService\\PerformStatsSensorService.exe"" start= auto DisplayName= ""Hardware Monitor"""; Flags: runhidden; StatusMsg: "Création du service Windows..."
 Filename: "sc.exe"; Parameters: "description Hardware_Monitor ""Expose les métriques via HTTP en local sur http://127.0.0.1:9755/metrics"""; Flags: runhidden
 Filename: "sc.exe"; Parameters: "start Hardware_Monitor"; Flags: runhidden; StatusMsg: "Démarrage du service..."
 

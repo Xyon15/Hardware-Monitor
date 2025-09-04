@@ -6,7 +6,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Dossiers
-$repo = "c:\Dev\Perform-Stats"
+# Utiliser le dossier du script comme racine du repo pour éviter les chemins codés en dur
+$repo = $PSScriptRoot
 $proj = Join-Path $repo "PerformStatsSensorService\PerformStatsSensorService.csproj"
 $dist = Join-Path $repo "dist"
 $distApp = Join-Path $dist "PerformStatsSensorService"
@@ -47,7 +48,7 @@ if (-not $ISCC) {
     throw "ISCC.exe introuvable. Installez Inno Setup 6 puis relancez."
 }
 
-# Compiler le script
-& $ISCC '"' + $iss + '"'
+# Compiler le script en passant le dossier dist
+& $ISCC "/DSourceDir=$dist" "$iss"
 
-Write-Host "Terminé. Le .exe d'installation est dans Output sous le répertoire du script Inno." -ForegroundColor Green
+Write-Host "Terminé. Le setup est généré dans: $dist (ex: $dist\Hardware_Monitor_Setup.exe)" -ForegroundColor Green

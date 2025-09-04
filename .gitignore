@@ -6,7 +6,8 @@
 
 # xyon perso ignore
 .zencoder/rules
-
+dist/
+build/
 
 
 # User-specific files
