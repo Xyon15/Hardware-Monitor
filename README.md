@@ -1,5 +1,7 @@
 # Hardware-Monitor
 
+**Version actuelle**: v1.1
+
 ## Description
 Hardware-Monitor est un outil de surveillance des performances matérielles pour Windows. Il permet de visualiser en temps réel les métriques système telles que l'utilisation du CPU, de la RAM, du GPU et de la VRAM, ainsi que leurs températures.
 
@@ -15,7 +17,7 @@ Hardware-Monitor est un outil de surveillance des performances matérielles pour
 ## Architecture
 Le projet se compose de deux parties principales :
 1. **Service de capteurs** (C# / .NET 8.0) - Collecte les données matérielles et les expose via une API HTTP locale
-2. **Interface graphique** (Python / PySide6) - Affiche les métriques en temps réel avec des indicateurs visuels
+2. **Interface graphique** (Python 3.10+ / PySide6) - Affiche les métriques en temps réel avec des indicateurs visuels
 
 ## Prérequis
 - Windows 10/11
@@ -27,7 +29,7 @@ Le projet se compose de deux parties principales :
 
 ### Option 1 : Installateur
 Utilisez l'installateur Windows fourni dans les releases :
-1. Téléchargez le dernier fichier .exe depuis la section Releases
+1. Téléchargez le dernier fichier .exe depuis la section Releases (version v1.1)
 2. Exécutez l'installateur et suivez les instructions
 
 ### Option 2 : Installation manuelle
@@ -75,7 +77,7 @@ http://127.0.0.1:9755/metrics
 
 ## Technologies utilisées
 - C# / .NET 8.0
-- LibreHardwareMonitor
+- LibreHardwareMonitor (LibreHardwareMonitorLib 0.9.3)
 - ASP.NET Core pour l'API REST
-- Python avec PySide6/PyQt5
+- Python 3.10+ avec PySide6
 - Inno Setup pour l'installateur Windows
