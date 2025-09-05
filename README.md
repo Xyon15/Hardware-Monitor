@@ -79,6 +79,3 @@ http://127.0.0.1:9755/metrics
 - ASP.NET Core pour l'API REST
 - Python avec PySide6/PyQt5
 - Inno Setup pour l'installateur Windows
-
-## Licence
-Ce projet est distribué sous licence [Insérer votre licence ici]
