@@ -9,6 +9,8 @@
 dist/
 build/
 release_v.1/
+release_v.1.1/
+releases/
 
 
 # User-specific files

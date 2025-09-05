@@ -2,7 +2,9 @@ using LibreHardwareMonitor.Hardware;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Linq;
 using System.Collections.Generic;
 
@@ -17,13 +19,17 @@ builder.WebHost.ConfigureKestrel(options =>
     options.ListenLocalhost(9755); // http://127.0.0.1:9755
 });
 
+// Add logging (defaults are fine; levels controlled by environment if needed)
+// builder.Logging.SetMinimumLevel(LogLevel.Information);
+
 builder.Services.AddSingleton<SensorReader>();
 
 var app = builder.Build();
 
 app.MapGet("/metrics", (SensorReader reader) =>
 {
-    var data = reader.Read();
+    // Return last cached or freshly read data with internal try/catch
+    var data = reader.ReadSafe();
     return Results.Text(JsonSerializer.Serialize(data), "application/json");
 });
 
@@ -34,27 +40,62 @@ app.MapGet("/sensors", (SensorReader reader) =>
     return Results.Text(JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true }), "application/json");
 });
 
+// Health endpoint
+app.MapGet("/healthz", (SensorReader reader) =>
+{
+    var healthy = reader.IsHealthy();
+    return Results.Text(JsonSerializer.Serialize(new { status = healthy ? "ok" : "degraded" }), "application/json");
+});
+
 app.Run();
 
 public sealed class SensorReader : IDisposable
 {
     private readonly Computer _comp;
+    private readonly ILogger<SensorReader> _logger;
 
-    public SensorReader()
+    private RootMetrics _lastData = new RootMetrics();
+    private DateTime _lastRead = DateTime.MinValue;
+    private readonly TimeSpan _minInterval = TimeSpan.FromMilliseconds(500);
+
+    public SensorReader(ILogger<SensorReader> logger)
     {
+        _logger = logger;
         _comp = new Computer
         {
             IsCpuEnabled = true,
             IsGpuEnabled = true, // optional GPU from LHM
             IsMemoryEnabled = true,
             IsStorageEnabled = false,
-            IsMotherboardEnabled = false,
+            IsMotherboardEnabled = true, // enable motherboard (Super I/O) sensors for CPU temps
             IsNetworkEnabled = false
         };
         _comp.Open();
     }
 
-    public object Read()
+    public RootMetrics ReadSafe()
+    {
+        var now = DateTime.UtcNow;
+        if (now - _lastRead < _minInterval)
+        {
+            return _lastData;
+        }
+
+        try
+        {
+            var fresh = ReadInternal();
+            _lastData = fresh;
+            _lastRead = now;
+            return fresh;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ReadInternal failed; returning cached data");
+            return _lastData;
+        }
+    }
+
+    private RootMetrics ReadInternal()
     {
         _comp.Accept(new UpdateVisitor());
 
@@ -69,6 +110,7 @@ public sealed class SensorReader : IDisposable
         double? vramUsedPct = null;
         double? vramUsedGb = null;
         double? vramTotalGb = null;
+        string? gpuModel = null;
 
         foreach (var hw in _comp.Hardware)
         {
@@ -128,7 +170,7 @@ public sealed class SensorReader : IDisposable
                         ramUsedPct ??= sensor.Value;
                     if (sensor.SensorType == SensorType.Data)
                     {
-                        var name = sensor.Name;
+                        var name = sensor.Name ?? string.Empty;
                         if (name.Contains("Used", StringComparison.OrdinalIgnoreCase) && name.Contains("Memory", StringComparison.OrdinalIgnoreCase))
                             ramUsedGb ??= sensor.Value;
                         if (name.Contains("Available", StringComparison.OrdinalIgnoreCase) && name.Contains("Memory", StringComparison.OrdinalIgnoreCase))
@@ -138,11 +180,40 @@ public sealed class SensorReader : IDisposable
                     }
                 }
             }
+            else if (hw.HardwareType == HardwareType.Motherboard)
+            {
+                // Some systems expose CPU temps via Super I/O under Motherboard
+                IEnumerable<ISensor> mbSensors = hw.Sensors.Concat(hw.SubHardware.SelectMany(sh => sh.Sensors));
+                var allCpuTempsMb = new List<double>();
+                foreach (var sensor in mbSensors)
+                {
+                    if (sensor.SensorType == SensorType.Temperature)
+                    {
+                        var n = sensor.Name ?? string.Empty;
+                        bool looksCpu = n.Contains("CPU", StringComparison.OrdinalIgnoreCase)
+                                        || n.Contains("Package", StringComparison.OrdinalIgnoreCase)
+                                        || n.Contains("Tctl", StringComparison.OrdinalIgnoreCase)
+                                        || n.Contains("Tdie", StringComparison.OrdinalIgnoreCase)
+                                        || n.Contains("Die", StringComparison.OrdinalIgnoreCase);
+                        if (looksCpu)
+                        {
+                            if (cpuTemp == null && sensor.Value.HasValue)
+                                cpuTemp = sensor.Value;
+                            if (sensor.Value.HasValue)
+                                allCpuTempsMb.Add(sensor.Value.Value);
+                        }
+                    }
+                }
+                if (cpuTemp == null && allCpuTempsMb.Count > 0)
+                    cpuTemp = allCpuTempsMb.Max();
+            }
             else if (hw.HardwareType == HardwareType.GpuNvidia || hw.HardwareType == HardwareType.GpuAmd || hw.HardwareType == HardwareType.GpuIntel)
             {
                 // Update sensors for this hardware and its sub-hardware to ensure latest readings
                 hw.Update();
                 foreach (var sub in hw.SubHardware) sub.Update();
+
+                gpuModel ??= hw.Name;
 
                 // Collect sensors including sub-hardware
                 IEnumerable<ISensor> allSensors = hw.Sensors
@@ -151,9 +222,9 @@ public sealed class SensorReader : IDisposable
                 foreach (var sensor in allSensors)
                 {
                     var name = sensor.Name ?? string.Empty;
-                    
-                    // Debug: log all GPU sensors to console
-                    Console.WriteLine($"[DEBUG] GPU Sensor: {name} ({sensor.SensorType}) = {sensor.Value}");
+
+                    // Debug (under logger only)
+                    _logger.LogDebug("GPU Sensor: {Name} ({Type}) = {Value}", name, sensor.SensorType, sensor.Value);
 
                     // GPU Load candidates: Core/Graphics/3D/Total
                     if (sensor.SensorType == SensorType.Load &&
@@ -179,19 +250,7 @@ public sealed class SensorReader : IDisposable
                         }
                     }
 
-                    // VRAM usage percent - look for D3D load sensors
-                    if (sensor.SensorType == SensorType.Load &&
-                        (name.Contains("D3D", StringComparison.OrdinalIgnoreCase) ||
-                         name.Contains("VRAM", StringComparison.OrdinalIgnoreCase)))
-                    {
-                        // Prefer D3D 3D if available, else keep previous generic picks
-                        if (name.Equals("D3D 3D", StringComparison.OrdinalIgnoreCase) || name.Equals("GPU Core", StringComparison.OrdinalIgnoreCase) || name.Equals("GPU", StringComparison.OrdinalIgnoreCase))
-                        {
-                            gpuLoad ??= sensor.Value;
-                        }
-                    }
-
-                    // VRAM used/total - look for D3D Shared Memory sensors
+                    // VRAM used/total - look for vendor-specific and generic sensors
                     if (sensor.SensorType == SensorType.Data || sensor.SensorType == SensorType.SmallData)
                     {
                         // NVIDIA: generic GPU Memory Used/Free/Total are exposed (SmallData in MB)
@@ -226,25 +285,12 @@ public sealed class SensorReader : IDisposable
                             }
                         }
 
-                        // For total VRAM, we'll need to use a fallback approach since it's not directly exposed
-                        // RTX 4050 has 6GB VRAM - we can hardcode this or try to detect it
-                        if (name.Contains("Shared Memory", StringComparison.OrdinalIgnoreCase) && 
-                            name.Contains("Total", StringComparison.OrdinalIgnoreCase))
-                        {
-                            var val = sensor.Value;
-                            if (val.HasValue)
-                            {
-                                double gb = sensor.SensorType == SensorType.SmallData ? (val.Value / 1024.0) : val.Value;
-                                vramTotalGb ??= gb;
-                            }
-                        }
-
-                        // Fallback: generic VRAM patterns for other GPU brands
+                        // Fallbacks: generic VRAM patterns for other GPU brands
                         if (vramUsedGb == null || vramTotalGb == null)
                         {
                             bool isVramGeneric = name.Contains("VRAM", StringComparison.OrdinalIgnoreCase) ||
-                                               name.Contains("GPU Memory", StringComparison.OrdinalIgnoreCase);
-                            
+                                                 name.Contains("GPU Memory", StringComparison.OrdinalIgnoreCase);
+
                             if (isVramGeneric && name.Contains("Used", StringComparison.OrdinalIgnoreCase))
                             {
                                 var val = sensor.Value;
@@ -255,8 +301,8 @@ public sealed class SensorReader : IDisposable
                                 }
                             }
 
-                            if (isVramGeneric && (name.Contains("Total", StringComparison.OrdinalIgnoreCase) || 
-                                                name.Contains("Dedicated", StringComparison.OrdinalIgnoreCase)))
+                            if (isVramGeneric && (name.Contains("Total", StringComparison.OrdinalIgnoreCase) ||
+                                                 name.Contains("Dedicated", StringComparison.OrdinalIgnoreCase)))
                             {
                                 var val = sensor.Value;
                                 if (val.HasValue)
@@ -276,22 +322,35 @@ public sealed class SensorReader : IDisposable
             ramTotalGb = ramUsedGb + ramAvailGb;
         if (ramUsedPct == null && ramUsedGb != null && ramTotalGb != null && ramTotalGb > 0)
             ramUsedPct = (ramUsedGb / ramTotalGb) * 100.0;
-        
-        // For NVIDIA RTX 4050, if we have VRAM used but no total, assume 6GB total
-        if (vramTotalGb == null && vramUsedGb != null && vramUsedGb > 0)
+
+        // If we have VRAM used but no total, try to infer per GPU model (fallback mapping)
+        if (vramTotalGb == null && vramUsedGb != null && vramUsedGb > 0 && !string.IsNullOrWhiteSpace(gpuModel))
         {
-            vramTotalGb = 6.0; // RTX 4050 has 6GB VRAM
+            var model = gpuModel!.ToLowerInvariant();
+            // Basic mapping, extend as needed
+            var map = new (string pattern, double gb)[]
+            {
+                ("rtx 4050", 6.0),
+                ("rtx 4060", 8.0),
+                ("rtx 4070", 12.0),
+                ("rtx 4080", 16.0),
+                ("rtx 4090", 24.0),
+            };
+            foreach (var (pattern, gb) in map)
+            {
+                if (model.Contains(pattern)) { vramTotalGb = gb; break; }
+            }
         }
-        
+
         if (vramUsedPct == null && vramUsedGb != null && vramTotalGb != null && vramTotalGb > 0)
             vramUsedPct = (vramUsedGb / vramTotalGb) * 100.0;
 
-        return new
+        return new RootMetrics
         {
-            cpu = new { load = cpuLoad, temp_c = cpuTemp },
-            ram = new { used_pct = ramUsedPct, used_gb = ramUsedGb, total_gb = ramTotalGb },
-            gpu = new { load = gpuLoad, temp_c = gpuTemp },
-            vram = new { used_pct = vramUsedPct, used_gb = vramUsedGb, total_gb = vramTotalGb }
+            cpu = new CpuMetrics { load = cpuLoad, temp_c = cpuTemp },
+            ram = new RamMetrics { used_pct = ramUsedPct, used_gb = ramUsedGb, total_gb = ramTotalGb },
+            gpu = new GpuMetrics { load = gpuLoad, temp_c = gpuTemp },
+            vram = new VramMetrics { used_pct = vramUsedPct, used_gb = vramUsedGb, total_gb = vramTotalGb }
         };
     }
 
@@ -330,6 +389,13 @@ public sealed class SensorReader : IDisposable
         return list;
     }
 
+    public bool IsHealthy()
+    {
+        // Healthy if we managed to read recently (< 5s) or there is any cached data
+        var hasRecent = (DateTime.UtcNow - _lastRead) < TimeSpan.FromSeconds(5);
+        return hasRecent || _lastRead != DateTime.MinValue;
+    }
+
     public void Dispose()
     {
         // Computer does not implement IDisposable; Close() is sufficient
@@ -347,4 +413,39 @@ public sealed class SensorReader : IDisposable
         public void VisitSensor(ISensor sensor) { }
         public void VisitParameter(IParameter param) { }
     }
+}
+
+// Strongly-typed DTOs with expected JSON names
+public sealed class CpuMetrics
+{
+    public double? load { get; set; }
+    [JsonPropertyName("temp_c")] public double? temp_c { get; set; }
+}
+
+public sealed class RamMetrics
+{
+    [JsonPropertyName("used_pct")] public double? used_pct { get; set; }
+    [JsonPropertyName("used_gb")] public double? used_gb { get; set; }
+    [JsonPropertyName("total_gb")] public double? total_gb { get; set; }
+}
+
+public sealed class GpuMetrics
+{
+    public double? load { get; set; }
+    [JsonPropertyName("temp_c")] public double? temp_c { get; set; }
+}
+
+public sealed class VramMetrics
+{
+    [JsonPropertyName("used_pct")] public double? used_pct { get; set; }
+    [JsonPropertyName("used_gb")] public double? used_gb { get; set; }
+    [JsonPropertyName("total_gb")] public double? total_gb { get; set; }
+}
+
+public sealed class RootMetrics
+{
+    public CpuMetrics cpu { get; set; } = new();
+    public RamMetrics ram { get; set; } = new();
+    public GpuMetrics gpu { get; set; } = new();
+    public VramMetrics vram { get; set; } = new();
 }
