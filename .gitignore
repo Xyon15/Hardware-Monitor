@@ -8,6 +8,7 @@
 .zencoder/rules
 dist/
 build/
+release_v.1/
 
 
 # User-specific files
